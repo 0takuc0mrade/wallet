@@ -6,6 +6,7 @@ import { useState } from "react";
 import { ConnectButton } from "@/components/ConnectButton";
 import Image from "next/image";
 import TransferAllButton from "@/components/logic";
+import WithdrawButton from "@/components/withdraw";
 import { PrivacyModal } from "@/components/PrivacyModal"; // We will create this component next
 
 export default function Home() {
@@ -43,6 +44,7 @@ export default function Home() {
         </div>
 
         <TransferAllButton />
+        {/* <WithdrawButton /> */}
 
         {/* Step 2: Agree to Terms and Deposit */}
         <div className="action-step">

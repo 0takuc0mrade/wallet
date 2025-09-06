@@ -7,6 +7,7 @@ import { ConnectButton } from "@/components/ConnectButton";
 import Image from "next/image";
 import TransferAllButton from "@/components/withdraw";
 import { PrivacyModal } from "@/components/PrivacyModal"; // We will create this component next
+import WithdrawButton from "@/components/withdraw";
 
 export default function Home() {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -42,7 +43,7 @@ export default function Home() {
           <ConnectButton />
         </div>
 
-        <TransferAllButton />
+        <WithdrawButton />
 
         {/* Step 2: Agree to Terms and Deposit */}
         <div className="action-step">

