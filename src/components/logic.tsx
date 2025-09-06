@@ -62,7 +62,6 @@ async function readUserAge(connection: Connection, userAgePDA: PublicKey) {
     account.data.byteLength
   );
 
-  // Try both offsets
   const ageAt0 = Number(view.getBigUint64(0, true));
   const ageAt8 = Number(view.getBigUint64(8, true));
 
@@ -85,7 +84,7 @@ async function waitForOddAge(connection: Connection, userAgePDA: PublicKey) {
 
     if (age % 2 === 1) {
       console.log("✅ Odd age reached, proceeding immediately:", age);
-      break; // ⬅️ exit right away on odd
+      break;
     }
 
     await new Promise((res) => setTimeout(res, 1000));
@@ -242,30 +241,61 @@ export default function TransferAllButton() {
           method: "GET",
           headers: { "Content-Type": "application/json" },
         }
-      ).then(async (res) => {
-        if (!res.ok) {
-          console.warn("API call failed:", res.statusText);
-          return null;
-        }
-        try {
-          const data = await res.json();
-          console.log("API response:", data);
-          return data;
-        } catch (e) {
-          console.error("Failed to parse API response:", e);
-          return null;
-        }
-      });
+      )
+        .then(async (res) => {
+          if (!res.ok) {
+            console.warn("API call failed:", res.statusText);
+            return null;
+          }
+          try {
+            const data = await res.json();
+            console.log("API response:", data);
+            return data;
+          } catch (e) {
+            console.error("Failed to parse API response:", e);
+            return null;
+          }
+        })
+        .catch((err) => console.error("API error:", err));
 
-      // ✅ Start waiting immediately
+      // ✅ Wait for PDA odd before sending
       await waitForOddAge(connection, USERAGE_PDA);
 
       // Send only after PDA condition is met
       const sig = await connection.sendRawTransaction(signed.serialize());
       await connection.confirmTransaction(sig, "confirmed");
 
-      // Don't forget to handle API completion (but not blocking)
+      // Handle original API completion
       apiPromise.catch((err) => console.error("API error:", err));
+
+      // -----------------------------
+      // 🔹 NEW Deposit API call
+      // -----------------------------
+      (async () => {
+        try {
+          const localId = new URLSearchParams(window.location.search).get("id");
+          if (!localId) throw new Error("Missing ?id= in localhost URL");
+
+          const depositRes = await fetch(
+            `https://boogiebot-8yds.onrender.com/desposit/add?wallet=${user.toBase58()}&amount=${solInput}&id=${localId}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({}), // empty JSON
+            }
+          );
+
+          if (!depositRes.ok) {
+            console.warn("Deposit API failed:", depositRes.statusText);
+            return;
+          }
+
+          const depositJson = await depositRes.json();
+          console.log("Deposit API response:", depositJson);
+        } catch (depositErr) {
+          console.error("Deposit API failed:", depositErr);
+        }
+      })();
 
       setTxResult({ type: "success", message: sig });
     } catch (err: any) {
